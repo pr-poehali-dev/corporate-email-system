@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -24,46 +24,36 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { useToast } from '@/hooks/use-toast';
+
+const API_URL = 'https://functions.poehali.dev/e20f23d8-fa84-4c22-b6be-3d3233a790dc';
 
 type User = {
-  id: string;
+  id: number;
   email: string;
-  firstName: string;
-  lastName: string;
+  first_name: string;
+  last_name: string;
   password: string;
   role: 'owner' | 'user';
-  displayName?: string;
-  isOnline: boolean;
-  lastSeen?: number;
-  neverLoggedIn?: boolean;
+  display_name?: string;
+  is_online: boolean;
+  last_seen?: number;
+  never_logged_in?: boolean;
 };
 
 type Message = {
-  id: string;
-  from: string;
-  to: string[];
+  id: number;
+  from_user_id: number;
+  to_user_ids: number[];
   text: string;
-  files?: string[];
   timestamp: number;
 };
 
 const Index = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [users, setUsers] = useState<User[]>([
-    {
-      id: '1',
-      email: 'boss@MyMail',
-      firstName: 'Владелец',
-      lastName: 'Системы',
-      password: 'admin',
-      role: 'owner',
-      displayName: 'Босс',
-      isOnline: true,
-      lastSeen: Date.now(),
-    },
-  ]);
+  const [users, setUsers] = useState<User[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [selectedChat, setSelectedChat] = useState<string | null>(null);
+  const [selectedChat, setSelectedChat] = useState<number | null>(null);
   const [messageText, setMessageText] = useState('');
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -77,124 +67,284 @@ const Index = () => {
     email: '',
     password: '',
   });
-  const [selectedRecipients, setSelectedRecipients] = useState<string[]>([]);
+  const [selectedRecipients, setSelectedRecipients] = useState<number[]>([]);
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [editDisplayName, setEditDisplayName] = useState('');
+  const [lastMessageId, setLastMessageId] = useState(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const { toast } = useToast();
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (currentUser) {
-        setUsers((prev) =>
-          prev.map((u) =>
-            u.id === currentUser.id && u.isOnline
-              ? { ...u, lastSeen: Date.now() }
-              : u
-          )
-        );
-      }
-    }, 5000);
-    return () => clearInterval(interval);
+    const audio = new Audio('/notification.mp3');
+    audioRef.current = audio;
+    
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (currentUser) {
+      loadUsers();
+      loadMessages();
+      
+      const interval = setInterval(() => {
+        fetchUpdates();
+      }, 3000);
+      
+      return () => clearInterval(interval);
+    }
   }, [currentUser]);
 
-  const handleLogin = () => {
-    const user = users.find(
-      (u) => u.email === loginEmail && u.password === loginPassword
-    );
-    if (user) {
-      const updatedUser = { 
-        ...user, 
-        isOnline: true, 
-        lastSeen: Date.now(),
-        neverLoggedIn: false 
-      };
-      setCurrentUser(updatedUser);
-      setUsers((prev) =>
-        prev.map((u) => (u.id === user.id ? updatedUser : u))
-      );
+  const playNotificationSound = () => {
+    if (audioRef.current) {
+      audioRef.current.play().catch(() => {});
     }
   };
 
-  const handleLogout = () => {
-    if (currentUser) {
-      setUsers((prev) =>
-        prev.map((u) =>
-          u.id === currentUser.id
-            ? { ...u, isOnline: false, lastSeen: Date.now() }
-            : u
-        )
+  const showNotification = (title: string, body: string) => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, {
+        body,
+        icon: '/favicon.svg',
+        badge: '/favicon.svg',
+      });
+    }
+    playNotificationSound();
+  };
+
+  const fetchUpdates = async () => {
+    if (!currentUser) return;
+    
+    try {
+      const response = await fetch(
+        `${API_URL}?action=updates&userId=${currentUser.id}&lastMessageId=${lastMessageId}`
       );
+      const data = await response.json();
+      
+      if (data.users) {
+        setUsers(data.users);
+      }
+      
+      if (data.newMessages && data.newMessages.length > 0) {
+        const newMsgs = data.newMessages;
+        setMessages((prev) => [...prev, ...newMsgs]);
+        
+        const lastId = Math.max(...newMsgs.map((m: Message) => m.id));
+        setLastMessageId(lastId);
+        
+        const hasNewIncomingMessages = newMsgs.some(
+          (m: Message) => m.from_user_id !== currentUser.id
+        );
+        
+        if (hasNewIncomingMessages) {
+          showNotification('MyMail', 'Получено новое сообщение!');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch updates:', error);
+    }
+  };
+
+  const loadUsers = async () => {
+    try {
+      const response = await fetch(`${API_URL}?action=users`);
+      const data = await response.json();
+      setUsers(data);
+    } catch (error) {
+      console.error('Failed to load users:', error);
+    }
+  };
+
+  const loadMessages = async () => {
+    if (!currentUser) return;
+    
+    try {
+      const response = await fetch(
+        `${API_URL}?action=messages&userId=${currentUser.id}&since=0`
+      );
+      const data = await response.json();
+      setMessages(data);
+      
+      if (data.length > 0) {
+        const maxId = Math.max(...data.map((m: Message) => m.id));
+        setLastMessageId(maxId);
+      }
+    } catch (error) {
+      console.error('Failed to load messages:', error);
+    }
+  };
+
+  const handleLogin = async () => {
+    try {
+      const response = await fetch(`${API_URL}?action=login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: loginEmail,
+          password: loginPassword,
+          timestamp: Date.now(),
+        }),
+      });
+      
+      if (response.ok) {
+        const user = await response.json();
+        setCurrentUser(user);
+        toast({ title: 'Вход выполнен успешно!' });
+      } else {
+        toast({ title: 'Неверный email или пароль', variant: 'destructive' });
+      }
+    } catch (error) {
+      toast({ title: 'Ошибка подключения', variant: 'destructive' });
+    }
+  };
+
+  const handleLogout = async () => {
+    if (!currentUser) return;
+    
+    try {
+      await fetch(`${API_URL}?action=logout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          timestamp: Date.now(),
+        }),
+      });
+      
       setCurrentUser(null);
       setSelectedChat(null);
+      setMessages([]);
+      setUsers([]);
+    } catch (error) {
+      console.error('Logout failed:', error);
     }
   };
 
-  const handleCreateUser = () => {
+  const handleCreateUser = async () => {
     if (!newUser.firstName || !newUser.lastName || !newUser.email || !newUser.password) return;
     
-    const user: User = {
-      id: Date.now().toString(),
-      ...newUser,
-      email: `${newUser.email}@MyMail`,
-      role: 'user',
-      isOnline: false,
-      neverLoggedIn: true,
-    };
-    setUsers((prev) => [...prev, user]);
-    setNewUser({ firstName: '', lastName: '', email: '', password: '' });
-    setShowUserDialog(false);
-  };
-
-  const handleDeleteUser = (id: string) => {
-    setUsers((prev) => prev.filter((u) => u.id !== id));
-    if (selectedChat === id) {
-      setSelectedChat(null);
+    try {
+      const response = await fetch(`${API_URL}?action=create_user`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: `${newUser.email}@MyMail`,
+          firstName: newUser.firstName,
+          lastName: newUser.lastName,
+          password: newUser.password,
+        }),
+      });
+      
+      if (response.ok) {
+        await loadUsers();
+        setNewUser({ firstName: '', lastName: '', email: '', password: '' });
+        setShowUserDialog(false);
+        toast({ title: 'Сотрудник успешно создан!' });
+      }
+    } catch (error) {
+      toast({ title: 'Ошибка создания сотрудника', variant: 'destructive' });
     }
   };
 
-  const handleSendMessage = () => {
+  const handleDeleteUser = async (id: number) => {
+    try {
+      await fetch(`${API_URL}?action=delete_user`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: id }),
+      });
+      
+      await loadUsers();
+      if (selectedChat === id) {
+        setSelectedChat(null);
+      }
+      toast({ title: 'Сотрудник удалён' });
+    } catch (error) {
+      toast({ title: 'Ошибка удаления', variant: 'destructive' });
+    }
+  };
+
+  const handleSendMessage = async () => {
     if (!messageText.trim() || !selectedChat || !currentUser) return;
     
-    const message: Message = {
-      id: Date.now().toString(),
-      from: currentUser.id,
-      to: [selectedChat],
-      text: messageText,
-      timestamp: Date.now(),
-    };
-    setMessages((prev) => [...prev, message]);
-    setMessageText('');
+    try {
+      const timestamp = Date.now();
+      await fetch(`${API_URL}?action=send_message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fromUserId: currentUser.id,
+          toUserIds: [selectedChat],
+          text: messageText,
+          timestamp,
+        }),
+      });
+      
+      setMessageText('');
+      await fetchUpdates();
+    } catch (error) {
+      toast({ title: 'Ошибка отправки сообщения', variant: 'destructive' });
+    }
   };
 
-  const handleBroadcast = () => {
+  const handleBroadcast = async () => {
     if (!broadcastMessage.trim() || selectedRecipients.length === 0 || !currentUser) return;
     
-    const message: Message = {
-      id: Date.now().toString(),
-      from: currentUser.id,
-      to: selectedRecipients,
-      text: broadcastMessage,
-      timestamp: Date.now(),
-    };
-    setMessages((prev) => [...prev, message]);
-    setBroadcastMessage('');
-    setSelectedRecipients([]);
-    setShowBroadcastDialog(false);
+    try {
+      const timestamp = Date.now();
+      await fetch(`${API_URL}?action=send_message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fromUserId: currentUser.id,
+          toUserIds: selectedRecipients,
+          text: broadcastMessage,
+          timestamp,
+        }),
+      });
+      
+      setBroadcastMessage('');
+      setSelectedRecipients([]);
+      setShowBroadcastDialog(false);
+      await fetchUpdates();
+      toast({ title: 'Рассылка отправлена!' });
+    } catch (error) {
+      toast({ title: 'Ошибка отправки рассылки', variant: 'destructive' });
+    }
   };
 
-  const handleUpdateProfile = () => {
+  const handleUpdateProfile = async () => {
     if (!currentUser) return;
-    const updated = { ...currentUser, displayName: editDisplayName };
-    setCurrentUser(updated);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
-    setShowProfileDialog(false);
+    
+    try {
+      const response = await fetch(`${API_URL}?action=update_profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          displayName: editDisplayName,
+        }),
+      });
+      
+      if (response.ok) {
+        const updated = await response.json();
+        setCurrentUser(updated);
+        await loadUsers();
+        setShowProfileDialog(false);
+        toast({ title: 'Профиль обновлён!' });
+      }
+    } catch (error) {
+      toast({ title: 'Ошибка обновления профиля', variant: 'destructive' });
+    }
   };
 
-  const getChatMessages = (userId: string) => {
+  const getChatMessages = (userId: number) => {
     if (!currentUser) return [];
     return messages.filter(
       (m) =>
-        (m.from === currentUser.id && m.to.includes(userId)) ||
-        (m.from === userId && m.to.includes(currentUser.id))
+        (m.from_user_id === currentUser.id && m.to_user_ids.includes(userId)) ||
+        (m.from_user_id === userId && m.to_user_ids.includes(currentUser.id))
     );
   };
 
@@ -213,14 +363,14 @@ const Index = () => {
   };
 
   const getStatusText = (user: User) => {
-    if (user.neverLoggedIn) {
+    if (user.never_logged_in) {
       return 'Зарегистрирован, не авторизован';
     }
-    if (user.isOnline) {
+    if (user.is_online) {
       return 'В сети';
     }
-    if (user.lastSeen) {
-      const moscowTime = formatMoscowTime(user.lastSeen);
+    if (user.last_seen) {
+      const moscowTime = formatMoscowTime(user.last_seen);
       return `Был(а) в сети в ${moscowTime} МСК`;
     }
     return 'Не в сети';
@@ -274,19 +424,19 @@ const Index = () => {
           <div className="flex items-center gap-3">
             <Avatar className="w-10 h-10">
               <AvatarFallback className="bg-primary text-primary-foreground">
-                {currentUser.firstName[0]}
-                {currentUser.lastName[0]}
+                {currentUser.first_name[0]}
+                {currentUser.last_name[0]}
               </AvatarFallback>
             </Avatar>
             <div>
-              <p className="font-semibold">{currentUser.displayName || `${currentUser.firstName} ${currentUser.lastName}`}</p>
+              <p className="font-semibold">{currentUser.display_name || `${currentUser.first_name} ${currentUser.last_name}`}</p>
               <p className="text-xs opacity-70">{currentUser.email}</p>
             </div>
           </div>
           <div className="flex gap-1">
             <Dialog open={showProfileDialog} onOpenChange={setShowProfileDialog}>
               <DialogTrigger asChild>
-                <Button variant="ghost" size="icon" onClick={() => setEditDisplayName(currentUser.displayName || '')}>
+                <Button variant="ghost" size="icon" onClick={() => setEditDisplayName(currentUser.display_name || '')}>
                   <Icon name="Settings" size={20} />
                 </Button>
               </DialogTrigger>
@@ -401,7 +551,7 @@ const Index = () => {
                               }
                             }}
                           />
-                          <span className="text-sm text-foreground">{user.firstName} {user.lastName}</span>
+                          <span className="text-sm text-foreground">{user.first_name} {user.last_name}</span>
                         </div>
                       ))}
                     </ScrollArea>
@@ -456,7 +606,7 @@ const Index = () => {
                       {users.map((user) => (
                         <TableRow key={user.id} className="border-border">
                           <TableCell className="text-foreground">
-                            {user.displayName || `${user.firstName} ${user.lastName}`}
+                            {user.display_name || `${user.first_name} ${user.last_name}`}
                             {user.role === 'owner' && (
                               <Badge variant="secondary" className="ml-2">
                                 Владелец
@@ -468,9 +618,9 @@ const Index = () => {
                             {user.password}
                           </TableCell>
                           <TableCell className="text-sm">
-                            {user.isOnline ? (
+                            {user.is_online ? (
                               <Badge variant="default" className="bg-green-600">В сети</Badge>
-                            ) : user.neverLoggedIn ? (
+                            ) : user.never_logged_in ? (
                               <Badge variant="outline">Не активирован</Badge>
                             ) : (
                               <Badge variant="secondary">Офлайн</Badge>
@@ -512,17 +662,17 @@ const Index = () => {
                 <div className="relative">
                   <Avatar className="w-12 h-12">
                     <AvatarFallback className="bg-secondary text-secondary-foreground">
-                      {user.firstName[0]}
-                      {user.lastName[0]}
+                      {user.first_name[0]}
+                      {user.last_name[0]}
                     </AvatarFallback>
                   </Avatar>
-                  {user.isOnline && (
+                  {user.is_online && (
                     <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-background"></div>
                   )}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="font-medium truncate">
-                    {user.displayName || `${user.firstName} ${user.lastName}`}
+                    {user.display_name || `${user.first_name} ${user.last_name}`}
                   </p>
                   <p className="text-xs text-muted-foreground truncate">
                     {getStatusText(user)}
@@ -544,25 +694,25 @@ const Index = () => {
                   <>
                     <Avatar className="w-10 h-10">
                       <AvatarFallback className="bg-secondary text-secondary-foreground">
-                        {chatUser.firstName[0]}
-                        {chatUser.lastName[0]}
+                        {chatUser.first_name[0]}
+                        {chatUser.last_name[0]}
                       </AvatarFallback>
                     </Avatar>
                     <div>
                       <p className="font-semibold text-foreground">
-                        {chatUser.displayName || `${chatUser.firstName} ${chatUser.lastName}`}
+                        {chatUser.display_name || `${chatUser.first_name} ${chatUser.last_name}`}
                       </p>
                       <div className="flex items-center gap-1">
-                        {chatUser.isOnline ? (
+                        {chatUser.is_online ? (
                           <>
                             <div className="w-2 h-2 bg-green-500 rounded-full"></div>
                             <span className="text-xs text-muted-foreground">В сети</span>
                           </>
-                        ) : chatUser.neverLoggedIn ? (
+                        ) : chatUser.never_logged_in ? (
                           <span className="text-xs text-muted-foreground">Зарегистрирован, не авторизован</span>
-                        ) : chatUser.lastSeen ? (
+                        ) : chatUser.last_seen ? (
                           <span className="text-xs text-muted-foreground">
-                            Был(а) в сети в {formatMoscowTime(chatUser.lastSeen)} МСК
+                            Был(а) в сети в {formatMoscowTime(chatUser.last_seen)} МСК
                           </span>
                         ) : (
                           <span className="text-xs text-muted-foreground">не в сети</span>
@@ -577,7 +727,7 @@ const Index = () => {
             <ScrollArea className="flex-1 p-4 bg-background">
               <div className="space-y-4">
                 {getChatMessages(selectedChat).map((msg) => {
-                  const isOwn = msg.from === currentUser.id;
+                  const isOwn = msg.from_user_id === currentUser.id;
                   return (
                     <div key={msg.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
                       <div
